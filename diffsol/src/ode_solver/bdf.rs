@@ -489,13 +489,17 @@ where
     }
 
     fn _update_step_size(&mut self, factor: Eqn::T) -> Result<Eqn::T, DiffsolError> {
+        self._set_step_size(factor * self.state.h)
+    }
+
+    fn _set_step_size(&mut self, new_h: Eqn::T) -> Result<Eqn::T, DiffsolError> {
         //If step size h is changed then also need to update the terms in
         //the first equation of page 9 of [1]:
         //
         //- constant c = h / (1-kappa) gamma_k term
         //- lu factorisation of (M - c * J) used in newton iteration (same equation)
 
-        let new_h = factor * self.state.h;
+        let factor = new_h / self.state.h;
         self.n_equal_steps = 0;
 
         // update D using equations in section 3.2 of [1]
@@ -709,6 +713,10 @@ where
             let factor = (tstop - state.t) / state.h;
             // update step size ignoring the possible "step size too small" error
             let _ = self._update_step_size(factor);
+            self._jacobian_updates(
+                self.state.h * self.alpha[self.state.order],
+                SolverState::StepSuccess,
+            );
         }
         Ok(None)
     }
@@ -1258,6 +1266,7 @@ where
         let output_in_error_control = problem.output_in_error_control();
         let integrate_sens = self.s_op.is_some();
         let old_num_error_test_failures = self.statistics.number_of_error_test_failures;
+        let old_num_nonlinear_solver_fails = self.statistics.number_of_nonlinear_solver_fails;
 
         let mut convergence_fail = false;
 
@@ -1280,6 +1289,24 @@ where
                 "State was modified, reinitialised to first order with h = {}",
                 self.state.h
             );
+        }
+
+        // The initial-step heuristic and a previous hard stop may leave a
+        // smaller step than the configured minimum. Begin the next numerical
+        // attempt at the minimum, then respect any closer hard stop. Only an
+        // error-driven reduction below the minimum is a convergence failure.
+        if self.state.h.abs() < self.config.minimum_timestep {
+            let minimum = if self.state.h < Eqn::T::zero() {
+                -self.config.minimum_timestep
+            } else {
+                self.config.minimum_timestep
+            };
+            self._set_step_size(minimum)?;
+            if let Some(tstop) = self.tstop {
+                if let Some(stop) = self.handle_tstop(tstop)? {
+                    return Ok(stop);
+                }
+            }
         }
 
         self._predict_forward();
@@ -1327,13 +1354,13 @@ where
             // handle case where either nonlinear solve failed
             if solve_result.is_err() {
                 self.statistics.number_of_nonlinear_solver_fails += 1;
-                if self.statistics.number_of_nonlinear_solver_fails
-                    > self.config.maximum_newton_fails
-                {
+                let step_failures = self.statistics.number_of_nonlinear_solver_fails
+                    - old_num_nonlinear_solver_fails;
+                if step_failures > self.config.maximum_newton_fails {
                     return Err(DiffsolError::from(
                         OdeSolverError::TooManyNonlinearSolverFailures {
                             time: self.state.t.to_f64().unwrap(),
-                            num_failures: self.statistics.number_of_nonlinear_solver_fails,
+                            num_failures: step_failures,
                         },
                     ));
                 }
@@ -1428,7 +1455,7 @@ where
 
         {
             let state = &mut self.state;
-            state.y.copy_from(&self.y_predict);
+            state.y.copy_from_view(&state.diff.column(0));
             state.t = self.t_predict;
             state.dy.copy_from_view(&state.diff.column(1));
             state.dy *= scale(Eqn::T::one() / state.h);
