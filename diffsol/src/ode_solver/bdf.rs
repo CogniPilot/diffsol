@@ -64,6 +64,7 @@ where
     }
     fn state_and_augmented_eqn_mut(&mut self) -> Option<(StateRefMut<'_, Eqn::V>, &mut AugEqn)> {
         self.is_state_modified = true;
+        self.accepted_extension = None;
         let state = self.state.as_mut();
         let augmented_eqn = self.s_op.as_mut().map(|op| &mut op.eqn)?;
         Some((state, augmented_eqn))
@@ -136,6 +137,11 @@ pub struct Bdf<
     op: Option<BdfCallable<&'a Eqn>>,
     n_equal_steps: usize,
     y_delta: Eqn::V,
+    y_candidate: Eqn::V,
+    trial_diff: M,
+    trial_y: Eqn::V,
+    trial_dy: Eqn::V,
+    trial_rhs: Eqn::V,
     g_delta: Eqn::V,
     y_predict: Eqn::V,
     t_predict: Eqn::T,
@@ -155,8 +161,26 @@ pub struct Bdf<
     tstop: Option<Eqn::T>,
     root_finder: Option<RootFinder<Eqn::V>>,
     is_state_modified: bool,
+    accepted_extension: Option<AcceptedExtension<M, Eqn::T>>,
     jacobian_update: JacobianUpdate<Eqn::T>,
     config: BdfConfig<Eqn::T>,
+}
+
+/// The continuous extension of the most recently accepted step.
+///
+/// After accepting a step, `step` rescales the difference table for the next
+/// step, and a nearby hard stop can shrink it by orders of magnitude.
+/// Evaluating the previous accepted point from that table extrapolates far
+/// outside its nodes, which amplifies rounding error by roughly
+/// `(h_old / h_new)^order`. Interpolation within the accepted step is therefore
+/// served from this copy, taken immediately after the accepted difference
+/// update, while the state is still at that step.
+#[derive(Clone)]
+struct AcceptedExtension<M, T> {
+    diff: M,
+    t: T,
+    h: T,
+    order: usize,
 }
 
 impl<M, Eqn, Nls, AugmentedEqn> Clone for Bdf<'_, Eqn, Nls, M, AugmentedEqn>
@@ -191,6 +215,11 @@ where
             s_op,
             n_equal_steps: self.n_equal_steps,
             y_delta: self.y_delta.clone(),
+            y_candidate: self.y_candidate.clone(),
+            trial_diff: self.trial_diff.clone(),
+            trial_y: self.trial_y.clone(),
+            trial_dy: self.trial_dy.clone(),
+            trial_rhs: self.trial_rhs.clone(),
             g_delta: self.g_delta.clone(),
             y_predict: self.y_predict.clone(),
             t_predict: self.t_predict,
@@ -209,6 +238,7 @@ where
             tstop: self.tstop,
             root_finder: self.root_finder.clone(),
             is_state_modified: self.is_state_modified,
+            accepted_extension: self.accepted_extension.clone(),
             jacobian_update: self.jacobian_update.clone(),
             config: self.config.clone(),
         }
@@ -323,6 +353,7 @@ where
         let nstates = problem.eqn.rhs().nstates();
         let diff_tmp = M::zeros(nstates, BdfState::<Eqn::V, M>::MAX_ORDER + 3, ctx.clone());
         let y_delta = <Eqn::V as Vector>::zeros(nstates, ctx.clone());
+        let y_candidate = <Eqn::V as Vector>::zeros(nstates, ctx.clone());
         let y_predict = <Eqn::V as Vector>::zeros(nstates, ctx.clone());
 
         let nout = if problem.integrate_out {
@@ -348,6 +379,11 @@ where
             gdiff_tmp,
             sgdiff_tmp: M::zeros(0, 0, ctx.clone()),
             y_delta,
+            y_candidate,
+            trial_diff: M::zeros(nstates, BdfState::<Eqn::V, M>::MAX_ORDER + 3, ctx.clone()),
+            trial_y: Eqn::V::zeros(nstates, ctx.clone()),
+            trial_dy: Eqn::V::zeros(nstates, ctx.clone()),
+            trial_rhs: Eqn::V::zeros(nstates, ctx.clone()),
             y_predict,
             t_predict: Eqn::T::zero(),
             s_predict: Eqn::V::zeros(0, ctx.clone()),
@@ -363,6 +399,7 @@ where
             tstop: None,
             root_finder,
             is_state_modified,
+            accepted_extension: None,
             jacobian_update: JacobianUpdate::new(&problem.ode_options),
             config,
         })
@@ -715,7 +752,7 @@ where
             let _ = self._update_step_size(factor);
             self._jacobian_updates(
                 self.state.h * self.alpha[self.state.order],
-                SolverState::StepSuccess,
+                SolverState::StepSizeTruncated,
             );
         }
         Ok(None)
@@ -751,6 +788,42 @@ where
         self.u = Self::_compute_r(1, Eqn::T::one(), self.problem().eqn.context().clone());
 
         self.is_state_modified = false;
+        self.accepted_extension = None;
+    }
+
+    /// Keep the accepted step's own interpolant before the order and step size
+    /// are chosen for the next step.
+    fn retain_accepted_extension(&mut self) {
+        let state = &self.state;
+        if let Some(extension) = self.accepted_extension.as_mut() {
+            if extension.diff.nrows() == state.diff.nrows()
+                && extension.diff.ncols() == state.diff.ncols()
+            {
+                extension.diff.copy_from(&state.diff);
+                extension.t = state.t;
+                extension.h = state.h;
+                extension.order = state.order;
+                return;
+            }
+        }
+        self.accepted_extension = Some(AcceptedExtension {
+            diff: state.diff.clone(),
+            t: state.t,
+            h: state.h,
+            order: state.order,
+        });
+    }
+
+    /// The difference table, anchor time, step size and order that describe
+    /// the solution over the current accepted step.
+    fn current_extension(&self) -> (&M, Eqn::T, Eqn::T, usize) {
+        let state = &self.state;
+        match self.accepted_extension.as_ref() {
+            Some(extension) if extension.t == state.t => {
+                (&extension.diff, extension.t, extension.h, extension.order)
+            }
+            _ => (&state.diff, state.t, state.h, state.order),
+        }
     }
 
     //interpolate solution at time values t* where t-h < t* < t
@@ -800,7 +873,47 @@ where
         }
     }
 
-    fn error_control(&self) -> Eqn::T {
+    // Check the native extension against the ODE in state units. The midpoint
+    // residual is a local estimator, using the requested error weights.
+    fn continuous_defect_control(&mut self) -> Eqn::T {
+        let state = &self.state;
+        self.trial_diff.copy_from(&state.diff);
+        Self::_update_diff(state.order, &self.y_delta, &mut self.trial_diff);
+        let mid = state.t + state.h * Eqn::T::from_f64(0.5).unwrap();
+        Self::interpolate_from_diff(
+            mid,
+            &self.trial_diff,
+            self.t_predict,
+            state.h,
+            state.order,
+            &mut self.trial_y,
+        );
+        Self::interpolate_derivative_from_diff(
+            mid,
+            &self.trial_diff,
+            self.t_predict,
+            state.h,
+            state.order,
+            &mut self.trial_dy,
+        );
+        self.ode_problem
+            .eqn
+            .rhs()
+            .call_inplace(&self.trial_y, mid, &mut self.trial_rhs);
+        self.trial_dy -= &self.trial_rhs;
+        self.trial_dy *= scale(state.h);
+        self.trial_dy
+            .squared_norm(&self.trial_y, &self.ode_problem.atol, self.ode_problem.rtol)
+    }
+
+    fn error_control(&mut self) -> Eqn::T {
+        // P' - f is an ODE residual only for an identity mass matrix.
+        // General mass-matrix/DAE equations retain their existing LTE control.
+        let defect_norm = if self.op.is_some() && self.ode_problem.eqn.mass().is_none() {
+            self.continuous_defect_control()
+        } else {
+            Eqn::T::zero()
+        };
         let state = &self.state;
         let order = state.order;
         let output_in_error_control = self.ode_problem.output_in_error_control();
@@ -822,8 +935,13 @@ where
         if self.op.is_some() {
             let atol = &self.ode_problem.atol;
             let rtol = self.ode_problem.rtol;
-            error_norm +=
-                self.y_delta.squared_norm(&state.y, atol, rtol) * self.error_const2[order - 1];
+            let lte =
+                self.y_delta.squared_norm(&self.y_candidate, atol, rtol) * self.error_const2[order];
+            error_norm += if defect_norm.is_nan() || defect_norm > lte {
+                defect_norm
+            } else {
+                lte
+            };
             ncontrib += 1;
             if output_in_error_control {
                 let rtol = self.ode_problem.out_rtol.unwrap();
@@ -1036,6 +1154,9 @@ where
         );
         let old_order = self.state.order;
         self.state = state;
+        // The replaced difference table has no accepted equal-size steps yet.
+        self.n_equal_steps = 0;
+        self.accepted_extension = None;
 
         if let Some(op) = self.op.as_mut() {
             op.set_c(self.state.h, self.alpha[self.state.order]);
@@ -1081,7 +1202,8 @@ where
         if (is_forward && t > state.t) || (!is_forward && t < state.t) {
             return Err(ode_solver_error!(InterpolationTimeAfterCurrentTime));
         }
-        Self::interpolate_from_diff(t, &state.diff, state.t, state.h, state.order, y);
+        let (diff, t1, h, order) = self.current_extension();
+        Self::interpolate_from_diff(t, diff, t1, h, order, y);
         Ok(())
     }
 
@@ -1107,7 +1229,8 @@ where
         if (is_forward && t > state.t) || (!is_forward && t < state.t) {
             return Err(ode_solver_error!(InterpolationTimeAfterCurrentTime));
         }
-        Self::interpolate_derivative_from_diff(t, &state.diff, state.t, state.h, state.order, dy);
+        let (diff, t1, h, order) = self.current_extension();
+        Self::interpolate_derivative_from_diff(t, diff, t1, h, order, dy);
         Ok(())
     }
 
@@ -1196,12 +1319,14 @@ where
     }
 
     fn into_state(mut self) -> BdfState<Eqn::V, M> {
+        self.accepted_extension = None;
         let ctx = self.problem().eqn.context().clone();
         std::mem::replace(&mut self.state, BdfState::new_empty(ctx))
     }
 
     fn state_mut(&mut self) -> StateRefMut<'_, Eqn::V> {
         self.is_state_modified = true;
+        self.accepted_extension = None;
         self.state.as_mut()
     }
 
@@ -1238,6 +1363,7 @@ where
         }
         state.t = t;
         self.is_state_modified = true;
+        self.accepted_extension = None;
         Ok(())
     }
 
@@ -1334,6 +1460,8 @@ where
                     // combine eq 3, 4 and 6 from [1] to obtain error
                     // Note that error = C_k * h^{k+1} y^{k+1}
                     // and d = D^{k+1} y_{n+1} \approx h^{k+1} y^{k+1}
+                    // Relative error weights belong to the solved new point.
+                    self.y_candidate.copy_from(&self.y_delta);
                     self.y_delta -= &self.y_predict;
 
                     // deal with output equations
@@ -1421,7 +1549,9 @@ where
                     * error_norm.pow(
                         <Eqn::T as FromPrimitive>::from_f64(-0.5 / (order as f64 + 1.0)).unwrap(),
                     );
-                if factor < self.config.minimum_timestep_shrink {
+                // A refused midpoint can make the error estimate NaN. Choose
+                // a finite rejection before rescaling the retained history.
+                if factor.is_nan() || factor < self.config.minimum_timestep_shrink {
                     factor = self.config.minimum_timestep_shrink;
                 }
                 debug!(
@@ -1460,6 +1590,7 @@ where
             state.dy.copy_from_view(&state.diff.column(1));
             state.dy *= scale(Eqn::T::one() / state.h);
         }
+        self.retain_accepted_extension();
 
         // update statistics
         if let Some(op) = self.op.as_ref() {

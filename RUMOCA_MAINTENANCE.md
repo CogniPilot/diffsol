@@ -4,14 +4,16 @@ This branch preserves upstream commit
 `7edd02af717287394bac346d4ed74ec141ae5a86` and Diffsol's published 0.13.2
 version and API. Original authorship and MIT licensing are unchanged.
 
-The changes in `diffsol/src/ode_solver/bdf.rs` and
+The changes in `diffsol/src/ode_solver/bdf.rs`,
+`diffsol/src/ode_solver/jacobian_update.rs`,
+`diffsol/src/nonlinear_solver/convergence.rs`, and
 `diffsol/src/nonlinear_solver/line_search.rs` are copied byte-for-byte from
-Rumoca's former vendored dependency. They publish the corrected accepted BDF
-endpoint, enforce the configured minimum before an attempt while respecting
-hard stops, refresh the Newton coefficient after a shortened hard stop,
-consume accepted Newton correction history and apply pending corrections, and
-scope nonlinear failure limits to the current step while retaining cumulative
-statistics. Tolerances, Armijo conditions, and failure limits are unchanged.
+Rumoca's vendored dependency at
+`db483f1fb485c058660e11f952835b636af87074`.
+[RUMOCA_PATCH.md](RUMOCA_PATCH.md) retains the complete numerical patch
+inventory and original upstream/package checksums. Original source and MIT
+licensing are preserved; no solver API, configured tolerance or model-specific
+behavior changes in this relocation.
 
 `diffsol/tests/bdf_numerical_regressions.rs`, `convergence_tests.rs`, and
 `failure_budget_tests.rs` reproduce these numerical contracts independently of
