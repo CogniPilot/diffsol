@@ -947,7 +947,8 @@ where
         if self.op.is_some() {
             let atol = &self.ode_problem.atol;
             let rtol = self.ode_problem.rtol;
-            let err = self.y_delta.squared_norm(&state.y, atol, rtol) * self.error_const2[order];
+            // the relative weights belong to the solved candidate, not the previous state
+            let err = self.y_delta.squared_norm(&self.y_new, atol, rtol) * self.error_const2[order];
             error_norm = error_norm.max(err);
             if output_in_error_control {
                 let rtol = self.ode_problem.out_rtol.unwrap();
