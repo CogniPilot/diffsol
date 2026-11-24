@@ -74,6 +74,7 @@ where
     }
     fn state_and_augmented_eqn_mut(&mut self) -> Option<(StateRefMut<'_, Eqn::V>, &mut AugEqn)> {
         self.is_state_modified = true;
+        self.accepted_t = None;
         let state = self.state.as_mut();
         let augmented_eqn = self.s_op.as_mut().map(|op| &mut op.eqn)?;
         Some((state, augmented_eqn))
@@ -159,6 +160,12 @@ pub struct Bdf<
     /// The corrector's iterate, which is the corrected solution `y_{n+1}` once the solve
     /// succeeds.
     y_new: Eqn::V,
+    // the accepted step's own difference table, step size and order, served to interpolation
+    // while the state is still at that step (see retain_accepted_extension)
+    accepted_diff: M,
+    accepted_h: Eqn::T,
+    accepted_order: usize,
+    accepted_t: Option<Eqn::T>,
     t_predict: Eqn::T,
     s_predict: Eqn::V,
     s_op: Option<BdfCallable<AugmentedEqn>>,
@@ -225,6 +232,10 @@ where
             g_delta: self.g_delta.clone(),
             y_predict: self.y_predict.clone(),
             y_new: self.y_new.clone(),
+            accepted_diff: self.accepted_diff.clone(),
+            accepted_h: self.accepted_h,
+            accepted_order: self.accepted_order,
+            accepted_t: self.accepted_t,
             t_predict: self.t_predict,
             s_predict: self.s_predict.clone(),
             s_deltas: self.s_deltas.clone(),
@@ -397,6 +408,10 @@ where
             y_delta,
             y_predict,
             y_new,
+            accepted_diff: M::zeros(nstates, MAX_ORDER + 3, ctx.clone()),
+            accepted_h: Eqn::T::zero(),
+            accepted_order: 1,
+            accepted_t: None,
             t_predict: Eqn::T::zero(),
             s_predict: Eqn::V::zeros(0, ctx.clone()),
             s_deltas: Eqn::V::zeros(0, ctx.clone()),
@@ -846,6 +861,7 @@ where
         self.u = Self::_compute_r(1, Eqn::T::one());
 
         self.is_state_modified = false;
+        self.accepted_t = None;
     }
 
     //interpolate solution at time values t* where t-h < t* < t
@@ -926,6 +942,32 @@ where
     /// eqs. 3, 4 and 6 of [1]: the error is `C_k h^{k+1} y^{(k+1)}`, and the correction
     /// `d = y_{n+1} - y_pred = D^{k+1} y_{n+1}` approximates `h^{k+1} y^{(k+1)}`, so the error is
     /// `C_k d`, with `error_const2[k] = C_k^2`.
+    /// Keep the accepted step's own difference table before the order and step size are chosen
+    /// for the next step. After a step is accepted the table is rescaled to the next step size,
+    /// and a stop time close ahead can shrink it by orders of magnitude. In exact arithmetic a
+    /// rescaled table represents the same polynomial, but evaluating the previous accepted point
+    /// from a table rescaled by a factor r at order k is an extrapolation whose weights grow like
+    /// r^k / k!, which amplifies the table's rounding error. Interpolation within the accepted
+    /// step is therefore served from this copy while the state is still at that step.
+    fn retain_accepted_extension(&mut self) {
+        let state = &self.state;
+        self.accepted_diff.copy_from(&state.diff);
+        self.accepted_h = state.h;
+        self.accepted_order = state.order;
+        self.accepted_t = Some(state.t);
+    }
+
+    /// The difference table, step size and order that describe the solution over the current
+    /// accepted step.
+    fn current_extension(&self) -> (&M, Eqn::T, usize) {
+        let state = &self.state;
+        if self.accepted_t == Some(state.t) {
+            (&self.accepted_diff, self.accepted_h, self.accepted_order)
+        } else {
+            (&state.diff, state.h, state.order)
+        }
+    }
+
     fn error_control(&self) -> Eqn::T {
         let state = &self.state;
         let order = state.order;
@@ -1190,6 +1232,7 @@ where
         );
         let old_order = self.state.order;
         self.state = state;
+        self.accepted_t = None;
         // the replaced difference table has no accepted equal-size steps yet
         self.n_equal_steps = 0;
 
@@ -1227,7 +1270,8 @@ where
         )? {
             return Ok(());
         }
-        Self::interpolate_from_diff(t, &state.diff, state.t, state.h, state.order, y);
+        let (diff, h, order) = self.current_extension();
+        Self::interpolate_from_diff(t, diff, state.t, h, order, y);
         Ok(())
     }
 
@@ -1245,7 +1289,8 @@ where
         )? {
             return Ok(());
         }
-        Self::interpolate_derivative_from_diff(t, &state.diff, state.t, state.h, state.order, dy);
+        let (diff, h, order) = self.current_extension();
+        Self::interpolate_derivative_from_diff(t, diff, state.t, h, order, dy);
         Ok(())
     }
 
@@ -1304,12 +1349,14 @@ where
     }
 
     fn into_state(mut self) -> BdfState<Eqn::V, M> {
+        self.accepted_t = None;
         let ctx = self.problem().eqn.context().clone();
         std::mem::replace(&mut self.state, BdfState::new_empty(ctx))
     }
 
     fn state_mut(&mut self) -> StateRefMut<'_, Eqn::V> {
         self.is_state_modified = true;
+        self.accepted_t = None;
         self.state.as_mut()
     }
 
@@ -1356,6 +1403,7 @@ where
         // the state is no longer the end of the recorded step
         state.last_step = None;
         self.is_state_modified = true;
+        self.accepted_t = None;
         Ok(())
     }
 
@@ -1650,6 +1698,7 @@ where
                     .axpy_v(inv_h, &state.sdiff.column(1), Eqn::T::zero());
             }
         }
+        self.retain_accepted_extension();
 
         // update statistics
         self.statistics.number_of_steps += 1;
