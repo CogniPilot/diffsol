@@ -67,6 +67,10 @@ impl<'a, V: Vector> Convergence<'a, V> {
     pub fn niter(&self) -> IndexType {
         self.niter
     }
+    pub(crate) fn current_correction_converged(&self, norm: V::T) -> bool {
+        norm <= self.tol
+    }
+
     pub fn eta(&self) -> V::T {
         self.eta
     }
