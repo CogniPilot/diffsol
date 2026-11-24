@@ -1190,6 +1190,8 @@ where
         );
         let old_order = self.state.order;
         self.state = state;
+        // the replaced difference table has no accepted equal-size steps yet
+        self.n_equal_steps = 0;
 
         if let Some(op) = self.op.as_mut() {
             op.set_c(self.state.h, self.alpha[self.state.order]);
