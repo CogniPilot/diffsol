@@ -70,6 +70,13 @@ impl<'a, V: Vector> Convergence<'a, V> {
     }
 
     pub fn check_norm(&mut self, norm: V::T) -> ConvergenceStatus {
+        self.check_norm_with(norm, true)
+    }
+
+    // `require_current_evidence` is false only for a caller that certifies the
+    // returned point itself with a fresh correction (see the backtracking line
+    // search); that check subsumes the retained-rate guard below.
+    fn check_norm_with(&mut self, norm: V::T, require_current_evidence: bool) -> ConvergenceStatus {
         trace!(
             "  Iteration {}, check non-linear solver norm = {:.3e}",
             self.niter + 1,
@@ -120,8 +127,11 @@ impl<'a, V: Vector> Convergence<'a, V> {
         // check if iteration is converged
         // A rate retained from another solve cannot certify a large first
         // correction. Measure contraction in this solve, or require the
-        // current correction itself to fit its unchanged tolerance.
-        if self.eta * norm < self.tol && (self.old_norm.is_some() || norm <= self.tol) {
+        // current correction itself to fit its unchanged tolerance, unless the
+        // caller checks the returned point with a fresh correction.
+        if self.eta * norm < self.tol
+            && (!require_current_evidence || self.old_norm.is_some() || norm <= self.tol)
+        {
             trace!(
                 "  Converged with eta * norm = {:.3e} < tol = {:.3e}",
                 (self.eta * norm).to_f64().unwrap(),
@@ -138,7 +148,25 @@ impl<'a, V: Vector> Convergence<'a, V> {
     }
 
     pub fn check_new_iteration(&mut self, norm: V::T) -> ConvergenceStatus {
-        let status = self.check_norm(norm);
+        self.check_new_iteration_with(norm, true)
+    }
+
+    /// As [`Self::check_new_iteration`], for a caller that follows a
+    /// `Converged` status with a fresh correction at the returned point and
+    /// accepts it only if [`Self::current_correction_converged`] holds.
+    pub(crate) fn check_new_iteration_before_returned_point_check(
+        &mut self,
+        norm: V::T,
+    ) -> ConvergenceStatus {
+        self.check_new_iteration_with(norm, false)
+    }
+
+    fn check_new_iteration_with(
+        &mut self,
+        norm: V::T,
+        require_current_evidence: bool,
+    ) -> ConvergenceStatus {
+        let status = self.check_norm_with(norm, require_current_evidence);
         if self.niter == 1 {
             self.old_norm = Some(norm);
         }

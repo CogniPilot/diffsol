@@ -139,7 +139,9 @@ impl<V: Vector> LineSearch<V> for BacktrackingLineSearch<V> {
         // The contraction estimate bounds error after this correction. A
         // correction computed by the preceding line search is still pending;
         // apply it before returning success, and record its norm only once.
-        match convergence.check_new_iteration(self.norm) {
+        // The returned point is certified below, so a retained rate may
+        // propose convergence here.
+        match convergence.check_new_iteration_before_returned_point_check(self.norm) {
             ConvergenceStatus::Converged => {
                 x.sub_assign(&*delta);
                 // A branch change can invalidate the estimated remaining error.

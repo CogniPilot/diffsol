@@ -162,6 +162,12 @@ previously returned points outside the unchanged correction budget. The direct
 regressions keep those inaccurate successes visible and permit the typed
 nonlinear failure that allows the caller to refresh its Jacobian. This check
 adds one residual evaluation to a successful returned-point certificate.
+Because that fresh correction decides success, the backtracking search lets a
+retained rate propose convergence without the current-solve evidence rule;
+the rule remains for full-step Newton (`NoLineSearch`), which has no
+returned-point check. Requiring both on the backtracking path only added Newton
+iterations (about 30% more on Modelica MultiBody models) without changing the
+outcome of any direct regression on that path.
 Replacing a BDF state also resets the equal-step counter associated with its
 discarded difference history.
 
