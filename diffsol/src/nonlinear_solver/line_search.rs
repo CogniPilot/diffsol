@@ -144,12 +144,17 @@ impl<V: Vector> LineSearch<V> for BacktrackingLineSearch<V> {
         match convergence.check_new_iteration_before_returned_point_check(self.norm) {
             ConvergenceStatus::Converged => {
                 x.sub_assign(&*delta);
+                let applied = self.norm;
                 // A branch change can invalidate the estimated remaining error.
                 // Check the returned point without advancing outer norm history.
                 fun(x, delta);
                 linear_solver(delta)?;
                 self.norm = convergence.norm(delta, error_y);
-                if convergence.current_correction_converged(self.norm) {
+                // The fresh correction measures contraction in this solve: accept
+                // only if it certifies the error left after applying it, and apply it.
+                let resolution = V::T::EPSILON * convergence.norm(x, error_y);
+                if convergence.fresh_correction_converged(applied, self.norm, resolution) {
+                    x.sub_assign(&*delta);
                     return Ok(ConvergenceStatus::Converged);
                 }
                 return Ok(ConvergenceStatus::Continue);

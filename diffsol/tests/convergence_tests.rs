@@ -141,3 +141,69 @@ fn backtracking_applies_the_correction_whose_remaining_error_it_certifies() {
         "measured fast contraction needs no additional residual calls"
     );
 }
+
+/// A backtracking solve whose corrections fit the tolerance but do not
+/// contract must not be accepted on a rate retained from an earlier solve:
+/// the remaining Newton error is then unbounded by this solve's evidence.
+/// (A linear solver that overshoots by 2x makes the iterates alternate about
+/// the root with a constant correction, contraction rate 1.)
+#[test]
+fn backtracking_refuses_corrections_within_tol_that_do_not_contract() {
+    let atol = vector(1.0);
+    let mut convergence = Convergence::with_tolerance(0.0, &atol, 0.2);
+    let mut search = BacktrackingLineSearch::<FaerVec<f64>>::default();
+    let mut correction = vector(0.0);
+    // An exact solve leaves a small retained rate.
+    let mut point = vector(1.0);
+    newton_iteration(
+        &mut point,
+        &mut correction,
+        &vector(1.0),
+        |x, out| out[0] = x[0],
+        |_delta| Ok(()),
+        &mut convergence,
+        &mut search,
+    )
+    .unwrap();
+    // A non-contracting solve that starts within tolerance.
+    let mut point = vector(0.05);
+    let outcome = newton_iteration(
+        &mut point,
+        &mut correction,
+        &vector(1.0),
+        |x, out| out[0] = x[0],
+        |delta| {
+            delta[0] *= 2.0;
+            Ok(())
+        },
+        &mut convergence,
+        &mut search,
+    );
+    assert!(
+        outcome.is_err(),
+        "accepted x = {} although its corrections never contracted (root 0)",
+        point[0]
+    );
+}
+
+/// A first correction of exactly zero means the point already solves the
+/// system; it is accepted without a contraction rate (which would be 0/0).
+#[test]
+fn backtracking_accepts_an_exact_initial_point() {
+    let atol = vector(1e-6);
+    let mut convergence = Convergence::new(0.0, &atol);
+    let mut search = BacktrackingLineSearch::<FaerVec<f64>>::default();
+    let mut point = vector(2.0);
+    let mut correction = vector(0.0);
+    newton_iteration(
+        &mut point,
+        &mut correction,
+        &vector(1.0),
+        |x, out| out[0] = x[0] - 2.0,
+        |_delta| Ok(()),
+        &mut convergence,
+        &mut search,
+    )
+    .unwrap();
+    assert_eq!(point[0], 2.0);
+}

@@ -162,12 +162,18 @@ previously returned points outside the unchanged correction budget. The direct
 regressions keep those inaccurate successes visible and permit the typed
 nonlinear failure that allows the caller to refresh its Jacobian. This check
 adds one residual evaluation to a successful returned-point certificate.
-Because that fresh correction decides success, the backtracking search lets a
-retained rate propose convergence without the current-solve evidence rule;
-the rule remains for full-step Newton (`NoLineSearch`), which has no
-returned-point check. Requiring both on the backtracking path only added Newton
-iterations (about 30% more on Modelica MultiBody models) without changing the
-outcome of any direct regression on that path.
+On the backtracking path a retained rate may propose convergence, and the
+fresh correction at the returned point decides it from contraction measured in
+that solve: the rate between the applied and the fresh correction must be below
+one and the classic estimate of the error left after the fresh correction must
+fit the tolerance, and the fresh correction is then applied. A correction no
+larger than the point's floating-point resolution (the weighted norm of machine
+epsilon times the point) is converged at roundoff, which includes an exact
+solution. Corrections that fit the tolerance without contracting are not
+convergence: accepting them left the iterate up to the full tolerance from the
+Newton solution and doubled the drift of a constant-temperature tank. Full-step
+Newton (`NoLineSearch`) keeps the current-solve evidence rule. The backtracking
+path needs no extra residual evaluation when it accepts.
 Replacing a BDF state also resets the equal-step counter associated with its
 discarded difference history.
 

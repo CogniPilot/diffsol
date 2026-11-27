@@ -30,8 +30,30 @@ impl<'a, V: Vector> Convergence<'a, V> {
     pub fn niter(&self) -> IndexType {
         self.niter
     }
-    pub(crate) fn current_correction_converged(&self, norm: V::T) -> bool {
-        norm <= self.tol
+    /// Whether the fresh correction at a returned point, `norm`, certifies
+    /// convergence. A correction no larger than the point's own floating-point
+    /// resolution, `resolution` (the weighted norm of machine epsilon times the
+    /// point), leaves nothing to correct: the point is converged at roundoff,
+    /// which includes an exact solution. Otherwise the solve must show
+    /// contraction itself: with the rate from the correction applied before it,
+    /// `previous`, the classic estimate of the error left after applying the
+    /// fresh correction must fit the tolerance. A rate retained from another
+    /// solve is not evidence, and corrections that fit the tolerance without
+    /// contracting are not convergence.
+    pub(crate) fn fresh_correction_converged(
+        &self,
+        previous: V::T,
+        norm: V::T,
+        resolution: V::T,
+    ) -> bool {
+        if norm <= resolution {
+            return true;
+        }
+        if norm > self.tol {
+            return false;
+        }
+        let rate = norm / previous;
+        rate < V::T::one() && rate / (V::T::one() - rate) * norm < self.tol
     }
 
     pub fn eta(&self) -> V::T {
@@ -153,7 +175,7 @@ impl<'a, V: Vector> Convergence<'a, V> {
 
     /// As [`Self::check_new_iteration`], for a caller that follows a
     /// `Converged` status with a fresh correction at the returned point and
-    /// accepts it only if [`Self::current_correction_converged`] holds.
+    /// accepts it only if [`Self::fresh_correction_converged`] holds.
     pub(crate) fn check_new_iteration_before_returned_point_check(
         &mut self,
         norm: V::T,
